@@ -47,6 +47,8 @@ namespace StereoMixCapture
         private bool isCapturing = false;
         private string outputDirectory;
         private bool enableFileOutput = true;
+        private string? loopbackFilePath;
+        private string? microphoneFilePath;
 
         /// <summary>
         /// Fired when loopback audio data is available. Use this for real-time processing/transcription.
@@ -132,9 +134,9 @@ namespace StereoMixCapture
                     // Only create file writer if file output is enabled
                     if (enableFileOutput)
                     {
-                        string loopbackFile = Path.Combine(outputDirectory, $"loopback_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
-                        loopbackWriter = new WaveFileWriter(loopbackFile, loopbackCapture.WaveFormat);
-                        Console.WriteLine($"Output file: {loopbackFile}");
+                        loopbackFilePath = Path.Combine(outputDirectory, $"loopback_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
+                        loopbackWriter = new WaveFileWriter(loopbackFilePath, loopbackCapture.WaveFormat);
+                        Console.WriteLine($"Output file: {loopbackFilePath}");
                     }
                     
                     loopbackCapture.DataAvailable += (sender, e) =>
@@ -175,9 +177,9 @@ namespace StereoMixCapture
                     // Only create file writer if file output is enabled
                     if (enableFileOutput)
                     {
-                        string microphoneFile = Path.Combine(outputDirectory, $"microphone_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
-                        microphoneWriter = new WaveFileWriter(microphoneFile, microphoneCapture.WaveFormat);
-                        Console.WriteLine($"Output file: {microphoneFile}");
+                        microphoneFilePath = Path.Combine(outputDirectory, $"microphone_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
+                        microphoneWriter = new WaveFileWriter(microphoneFilePath, microphoneCapture.WaveFormat);
+                        Console.WriteLine($"Output file: {microphoneFilePath}");
                     }
 
                     microphoneCapture.DataAvailable += (sender, e) =>
@@ -228,6 +230,7 @@ namespace StereoMixCapture
 
             Console.WriteLine("\nStopping audio capture...");
 
+            // Stop capture sources first so no new data arrives
             if (loopbackCapture != null)
             {
                 loopbackCapture.StopRecording();
@@ -256,6 +259,15 @@ namespace StereoMixCapture
 
             isCapturing = false;
             Console.WriteLine("Audio capture stopped and files saved.");
+
+            // Automatically mix the captured files into a single output
+            if (loopbackFilePath != null && microphoneFilePath != null
+                && File.Exists(loopbackFilePath) && File.Exists(microphoneFilePath))
+            {
+                string mixedFile = Path.Combine(outputDirectory, $"mixed_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
+                Console.WriteLine("\nMixing captured audio files...");
+                AudioMixer.MixAudioFiles(loopbackFilePath, microphoneFilePath, mixedFile);
+            }
         }
 
         public void Dispose()

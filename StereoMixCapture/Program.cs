@@ -60,33 +60,6 @@ namespace StereoMixCapture
                 // Stop capture
                 captureManager.StopCapture();
 
-                // Ask if user wants to mix the files
-                Console.Write("\nWould you like to mix the captured audio files? (y/n): ");
-                string? mixResponse = Console.ReadLine();
-                
-                if (mixResponse?.ToLower() == "y")
-                {
-                    // Find the most recent loopback and microphone files
-                    var loopbackFiles = Directory.GetFiles(outputDir, "loopback_*.wav")
-                        .OrderByDescending(f => File.GetCreationTime(f))
-                        .ToList();
-                    
-                    var microphoneFiles = Directory.GetFiles(outputDir, "microphone_*.wav")
-                        .OrderByDescending(f => File.GetCreationTime(f))
-                        .ToList();
-
-                    if (loopbackFiles.Any() && microphoneFiles.Any())
-                    {
-                        string mixedOutputPath = Path.Combine(outputDir, $"mixed_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
-                        Console.WriteLine($"\nMixing audio files...");
-                        AudioMixer.MixAudioFiles(loopbackFiles[0], microphoneFiles[0], mixedOutputPath);
-                    }
-                    else
-                    {
-                        Console.WriteLine("Could not find both loopback and microphone files to mix.");
-                    }
-                }
-
                 Console.WriteLine("\nDone! Press any key to exit.");
                 Console.ReadKey();
             }
