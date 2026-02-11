@@ -1,7 +1,3 @@
 <Solution>
-  <Project Path="../MicrophoneSpeaker/NoteAssistantUI/NoteAssistantUI.csproj">
-    <Platform Project="x64" />
-    <Deploy />
-  </Project>
   <Project Path="StereoMixCapture/StereoMixCapture.csproj" />
 </Solution>
