@@ -1,15 +1,18 @@
 using StereoMixCapture;
+using Azure.Identity;
+using Microsoft.CognitiveServices.Speech;
 using System;
 
 namespace StereoMixCapture
 {
     class Program
     {
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
             Console.WriteLine("===========================================");
             Console.WriteLine("   Stereo Mix Capture - Audio Recording");
             Console.WriteLine("   Captures Internal Audio + Microphone");
+            Console.WriteLine("   With Real-Time AI Speech Transcription");
             Console.WriteLine("===========================================\n");
 
             try
@@ -50,14 +53,79 @@ namespace StereoMixCapture
                     Console.WriteLine($"Created output directory: {outputDir}");
                 }
 
+                // Azure AI Foundry Speech configuration
+                Console.Write("\nEnable real-time transcription? (y/n, default n): ");
+                string? enableTranscription = Console.ReadLine();
+
+                SpeechTranscriptionService? transcriptionService = null;
+
                 // Create and start audio capture
                 using var captureManager = new AudioCaptureManager(outputDir);
+
+                if (enableTranscription?.Trim().ToLower() == "y")
+                {
+                    Console.Write("Enter transcription language (e.g. en-US, default en-US): ");
+                    string? language = Console.ReadLine();
+                    if (string.IsNullOrWhiteSpace(language))
+                    {
+                        language = "en-US";
+                    }
+
+                    // Authenticate with Entra ID interactive browser login
+                    Console.WriteLine("\nAuthenticating with Azure Entra ID (browser will open)...");
+                    var credential = new InteractiveBrowserCredential();
+
+                    // Use the Azure AI Foundry custom endpoint
+                    var speechEndpoint = new Uri("https://na-foundry.cognitiveservices.azure.com");
+                    var speechConfig = SpeechConfig.FromEndpoint(speechEndpoint, credential);
+                    speechConfig.SpeechRecognitionLanguage = language;
+
+                    Console.WriteLine($"Using endpoint: {speechEndpoint}");
+
+                    transcriptionService = new SpeechTranscriptionService(captureManager, speechConfig);
+
+                    transcriptionService.Transcribing += (s, e) =>
+                    {
+                        Console.Write($"\r  TRANSCRIBING [{e.Source}]: {e.Text}                    ");
+                    };
+
+                    transcriptionService.StatusChanged += (s, e) =>
+                    {
+                        Console.WriteLine($"\n  STATUS: {e}");
+                    };
+                }
+
+                // Start audio capture first (so formats are determined)
                 captureManager.StartCapture(loopbackIndex, micIndex);
+
+                // Then start transcription if configured
+                if (transcriptionService != null)
+                {
+                    Console.WriteLine("\nStarting real-time transcription...\n");
+                    _ = transcriptionService.StartAsync();
+                    // Give the transcribers a moment to connect
+                    await Task.Delay(500);
+                }
 
                 // Wait for user to stop
                 Console.ReadKey();
 
-                // Stop capture
+                // Stop transcription first, then capture
+                if (transcriptionService != null)
+                {
+                    Console.WriteLine("\nStopping transcription...");
+                    try
+                    {
+                        await transcriptionService.StopAsync();
+                    }
+                    catch (TimeoutException)
+                    {
+                        Console.WriteLine("Transcription stop timed out, continuing...");
+                    }
+                    transcriptionService.Dispose();
+                }
+
+                // Stop capture (also auto-mixes files)
                 captureManager.StopCapture();
 
                 Console.WriteLine("\nDone! Press any key to exit.");
