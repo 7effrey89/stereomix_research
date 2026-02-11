@@ -15,9 +15,6 @@ namespace StereoMixCapture
         private WaveInEvent? microphoneCapture;
         private WaveFileWriter? loopbackWriter;
         private WaveFileWriter? microphoneWriter;
-        private WaveFileWriter? mixedWriter;
-        private BufferedWaveProvider? loopbackBuffer;
-        private BufferedWaveProvider? microphoneBuffer;
         private bool isCapturing = false;
         private string outputDirectory;
 
@@ -77,17 +74,12 @@ namespace StereoMixCapture
                     
                     string loopbackFile = Path.Combine(outputDirectory, $"loopback_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
                     loopbackWriter = new WaveFileWriter(loopbackFile, loopbackCapture.WaveFormat);
-                    loopbackBuffer = new BufferedWaveProvider(loopbackCapture.WaveFormat);
                     
                     loopbackCapture.DataAvailable += (sender, e) =>
                     {
                         if (loopbackWriter != null)
                         {
                             loopbackWriter.Write(e.Buffer, 0, e.BytesRecorded);
-                        }
-                        if (loopbackBuffer != null)
-                        {
-                            loopbackBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
                         }
                     };
                     
@@ -112,17 +104,12 @@ namespace StereoMixCapture
 
                     string microphoneFile = Path.Combine(outputDirectory, $"microphone_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
                     microphoneWriter = new WaveFileWriter(microphoneFile, microphoneCapture.WaveFormat);
-                    microphoneBuffer = new BufferedWaveProvider(microphoneCapture.WaveFormat);
 
                     microphoneCapture.DataAvailable += (sender, e) =>
                     {
                         if (microphoneWriter != null)
                         {
                             microphoneWriter.Write(e.Buffer, 0, e.BytesRecorded);
-                        }
-                        if (microphoneBuffer != null)
-                        {
-                            microphoneBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
                         }
                     };
 
@@ -183,12 +170,6 @@ namespace StereoMixCapture
             {
                 microphoneWriter.Dispose();
                 microphoneWriter = null;
-            }
-
-            if (mixedWriter != null)
-            {
-                mixedWriter.Dispose();
-                mixedWriter = null;
             }
 
             isCapturing = false;

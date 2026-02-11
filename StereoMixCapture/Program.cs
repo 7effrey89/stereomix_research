@@ -20,11 +20,21 @@ namespace StereoMixCapture
                 // Get user input for device selection
                 Console.Write("Select loopback device index (or press Enter for default 0): ");
                 string? loopbackInput = Console.ReadLine();
-                int loopbackIndex = string.IsNullOrWhiteSpace(loopbackInput) ? 0 : int.Parse(loopbackInput);
+                int loopbackIndex = 0;
+                if (!string.IsNullOrWhiteSpace(loopbackInput) && !int.TryParse(loopbackInput, out loopbackIndex))
+                {
+                    Console.WriteLine("Invalid input. Using default device 0.");
+                    loopbackIndex = 0;
+                }
 
                 Console.Write("Select microphone device index (or press Enter for default 0): ");
                 string? micInput = Console.ReadLine();
-                int micIndex = string.IsNullOrWhiteSpace(micInput) ? 0 : int.Parse(micInput);
+                int micIndex = 0;
+                if (!string.IsNullOrWhiteSpace(micInput) && !int.TryParse(micInput, out micIndex))
+                {
+                    Console.WriteLine("Invalid input. Using default device 0.");
+                    micIndex = 0;
+                }
 
                 Console.Write("\nEnter output directory (or press Enter for current directory): ");
                 string? outputDir = Console.ReadLine();
