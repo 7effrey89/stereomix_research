@@ -9,6 +9,9 @@ A C# solution that captures both internal audio (stereo mix/loopback) and microp
 - **Simultaneous Recording**: Records both sources at the same time in separate files
 - **Audio Mixing**: Optionally mix both audio streams into a single output file
 - **Device Selection**: Choose specific audio devices for recording
+- **Real-Time Audio Access**: Low-latency events for real-time processing and transcription (20-30ms)
+- **Configurable Latency**: Adjustable buffer sizes for latency vs. performance trade-offs
+- **Flexible Output**: Optional file recording - supports real-time-only or file+real-time modes
 - **Cross-compatible**: Works on Windows 10 and Windows 11
 
 ## Requirements
@@ -60,6 +63,14 @@ The application creates the following files:
 - **WASAPI Loopback**: Used for capturing internal audio (what's playing on the system)
 - **WaveIn API**: Used for capturing microphone and line-in audio
 - **NAudio Library**: Provides the audio processing capabilities
+- **Real-Time Events**: Exposes audio data via events for low-latency processing
+
+### Latency Performance
+
+- **WASAPI Loopback**: 10-30ms typical latency
+- **Microphone (WaveInEvent)**: 20-100ms configurable (default: 100ms)
+- **Recommended for Real-Time Transcription**: 20-50ms buffer size
+- See [REALTIME_TRANSCRIPTION.md](REALTIME_TRANSCRIPTION.md) for detailed guidance
 
 ### How It Works
 
@@ -67,6 +78,7 @@ The application creates the following files:
    - Uses Windows Audio Session API (WASAPI) in loopback mode
    - Captures the mixed audio output that would go to speakers
    - No need for "Stereo Mix" device to be enabled in Windows
+   - Low latency suitable for real-time processing
 
 2. **Microphone Capture**:
    - Uses standard WaveIn API for input devices
@@ -90,11 +102,13 @@ StereoMixCapture/
 
 ## Use Cases
 
+- **Real-Time Transcription**: Low-latency audio capture for speech-to-text services (Azure Speech, OpenAI Whisper, etc.)
 - **Screen Recording**: Capture both system audio and commentary
 - **Podcasting**: Record application audio along with microphone input
 - **Gaming**: Record game audio and voice chat simultaneously
 - **Tutorials**: Capture software audio and narration together
 - **Music Production**: Record computer playback with live input
+- **Live Streaming**: Real-time audio processing for streaming applications
 
 ## Dependencies
 

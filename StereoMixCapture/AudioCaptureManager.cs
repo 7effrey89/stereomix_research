@@ -7,7 +7,36 @@ using System.Linq;
 namespace StereoMixCapture
 {
     /// <summary>
+    /// Event arguments for real-time audio data.
+    /// </summary>
+    public class AudioDataEventArgs : EventArgs
+    {
+        public byte[] Buffer { get; set; }
+        public int BytesRecorded { get; set; }
+        public WaveFormat Format { get; set; }
+        public AudioSource Source { get; set; }
+
+        public AudioDataEventArgs(byte[] buffer, int bytesRecorded, WaveFormat format, AudioSource source)
+        {
+            Buffer = buffer;
+            BytesRecorded = bytesRecorded;
+            Format = format;
+            Source = source;
+        }
+    }
+
+    /// <summary>
+    /// Indicates the source of audio data.
+    /// </summary>
+    public enum AudioSource
+    {
+        Loopback,
+        Microphone
+    }
+
+    /// <summary>
     /// Manages audio capture from multiple sources including internal audio (loopback) and microphone.
+    /// Supports both file-based recording and real-time audio data access for transcription and processing.
     /// </summary>
     public class AudioCaptureManager : IDisposable
     {
@@ -17,6 +46,34 @@ namespace StereoMixCapture
         private WaveFileWriter? microphoneWriter;
         private bool isCapturing = false;
         private string outputDirectory;
+        private bool enableFileOutput = true;
+
+        /// <summary>
+        /// Fired when loopback audio data is available. Use this for real-time processing/transcription.
+        /// </summary>
+        public event EventHandler<AudioDataEventArgs>? LoopbackDataAvailable;
+
+        /// <summary>
+        /// Fired when microphone audio data is available. Use this for real-time processing/transcription.
+        /// </summary>
+        public event EventHandler<AudioDataEventArgs>? MicrophoneDataAvailable;
+
+        /// <summary>
+        /// Gets or sets the buffer size in milliseconds for microphone capture.
+        /// Lower values = lower latency but higher CPU usage. Default is 100ms.
+        /// For real-time transcription, consider 20-50ms.
+        /// </summary>
+        public int MicrophoneBufferMilliseconds { get; set; } = 100;
+
+        /// <summary>
+        /// Gets or sets whether to save audio to files. Set to false for real-time-only scenarios.
+        /// Default is true.
+        /// </summary>
+        public bool EnableFileOutput
+        {
+            get => enableFileOutput;
+            set => enableFileOutput = value;
+        }
 
         public AudioCaptureManager(string outputDirectory = ".")
         {
@@ -72,15 +129,28 @@ namespace StereoMixCapture
                     var loopbackDevice = devices[loopbackDeviceIndex];
                     loopbackCapture = new WasapiLoopbackCapture(loopbackDevice);
                     
-                    string loopbackFile = Path.Combine(outputDirectory, $"loopback_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
-                    loopbackWriter = new WaveFileWriter(loopbackFile, loopbackCapture.WaveFormat);
+                    // Only create file writer if file output is enabled
+                    if (enableFileOutput)
+                    {
+                        string loopbackFile = Path.Combine(outputDirectory, $"loopback_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
+                        loopbackWriter = new WaveFileWriter(loopbackFile, loopbackCapture.WaveFormat);
+                        Console.WriteLine($"Output file: {loopbackFile}");
+                    }
                     
                     loopbackCapture.DataAvailable += (sender, e) =>
                     {
+                        // Write to file if enabled
                         if (loopbackWriter != null)
                         {
                             loopbackWriter.Write(e.Buffer, 0, e.BytesRecorded);
                         }
+                        
+                        // Raise event for real-time processing
+                        LoopbackDataAvailable?.Invoke(this, new AudioDataEventArgs(
+                            e.Buffer, 
+                            e.BytesRecorded, 
+                            loopbackCapture.WaveFormat, 
+                            AudioSource.Loopback));
                     };
                     
                     loopbackCapture.RecordingStopped += (sender, e) =>
@@ -89,7 +159,6 @@ namespace StereoMixCapture
                     };
 
                     Console.WriteLine($"Starting loopback capture: {loopbackDevice.FriendlyName}");
-                    Console.WriteLine($"Output file: {loopbackFile}");
                     loopbackCapture.StartRecording();
                 }
 
@@ -99,18 +168,32 @@ namespace StereoMixCapture
                     microphoneCapture = new WaveInEvent
                     {
                         DeviceNumber = microphoneDeviceIndex,
-                        WaveFormat = new WaveFormat(44100, 16, 2) // Standard CD quality
+                        WaveFormat = new WaveFormat(44100, 16, 2), // Standard CD quality
+                        BufferMilliseconds = MicrophoneBufferMilliseconds // Configurable for latency control
                     };
 
-                    string microphoneFile = Path.Combine(outputDirectory, $"microphone_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
-                    microphoneWriter = new WaveFileWriter(microphoneFile, microphoneCapture.WaveFormat);
+                    // Only create file writer if file output is enabled
+                    if (enableFileOutput)
+                    {
+                        string microphoneFile = Path.Combine(outputDirectory, $"microphone_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
+                        microphoneWriter = new WaveFileWriter(microphoneFile, microphoneCapture.WaveFormat);
+                        Console.WriteLine($"Output file: {microphoneFile}");
+                    }
 
                     microphoneCapture.DataAvailable += (sender, e) =>
                     {
+                        // Write to file if enabled
                         if (microphoneWriter != null)
                         {
                             microphoneWriter.Write(e.Buffer, 0, e.BytesRecorded);
                         }
+                        
+                        // Raise event for real-time processing
+                        MicrophoneDataAvailable?.Invoke(this, new AudioDataEventArgs(
+                            e.Buffer, 
+                            e.BytesRecorded, 
+                            microphoneCapture.WaveFormat, 
+                            AudioSource.Microphone));
                     };
 
                     microphoneCapture.RecordingStopped += (sender, e) =>
@@ -119,7 +202,6 @@ namespace StereoMixCapture
                     };
 
                     Console.WriteLine($"Starting microphone capture: Device {microphoneDeviceIndex}");
-                    Console.WriteLine($"Output file: {microphoneFile}");
                     microphoneCapture.StartRecording();
                 }
 
