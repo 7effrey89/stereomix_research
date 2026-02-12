@@ -10,23 +10,19 @@ namespace StereoMixCapture
 {
     /// <summary>
     /// Integrates AudioCaptureManager with Azure AI Foundry Speech real-time transcription.
-    /// Runs two ConversationTranscriber instances in parallel — one for loopback (soundcard)
-    /// audio and one for microphone — mirroring the NoteAssistantUI dual-transcription pattern
-    /// but using AudioCaptureManager as the audio source instead of raw NAudio devices.
+    /// Uses a single ConversationTranscriber fed from the mixed (loopback + microphone) audio
+    /// stream produced by AudioCaptureManager, saving cost by running only one transcription session.
     /// </summary>
     public class SpeechTranscriptionService : IDisposable
     {
         private readonly AudioCaptureManager captureManager;
         private readonly SpeechConfig speechConfig;
 
-        private PushAudioInputStream? loopbackPushStream;
-        private PushAudioInputStream? microphonePushStream;
-        private ConversationTranscriber? loopbackTranscriber;
-        private ConversationTranscriber? microphoneTranscriber;
+        private PushAudioInputStream? pushStream;
+        private ConversationTranscriber? transcriber;
 
         private CancellationTokenSource? cts;
-        private TaskCompletionSource<int>? stopLoopback;
-        private TaskCompletionSource<int>? stopMicrophone;
+        private TaskCompletionSource<int>? stopSignal;
 
         /// <summary>
         /// Raised when a partial (in-progress) transcription result is available.
@@ -47,51 +43,33 @@ namespace StereoMixCapture
         {
             this.captureManager = captureManager;
             this.speechConfig = speechConfig;
+
+            // Subscribe early so AudioCaptureManager sees the handler when StartCapture is called
+            captureManager.MixedDataAvailable += OnMixedData;
         }
 
         /// <summary>
-        /// Starts real-time transcription on both loopback and microphone audio streams.
+        /// Starts real-time transcription on the mixed audio stream.
         /// Call this after AudioCaptureManager.StartCapture() so formats are known.
         /// </summary>
         public async Task StartAsync()
         {
             cts = new CancellationTokenSource();
 
-            // Subscribe to audio data events from the capture manager
-            captureManager.LoopbackDataAvailable += OnLoopbackData;
-            captureManager.MicrophoneDataAvailable += OnMicrophoneData;
-
-            // Start loopback transcriber
-            var loopbackTask = StartTranscriberAsync("Loopback", AudioSource.Loopback);
-
-            // Start microphone transcriber
-            var microphoneTask = StartTranscriberAsync("Microphone", AudioSource.Microphone);
-
-            await Task.WhenAll(loopbackTask, microphoneTask);
+            await StartTranscriberAsync();
         }
 
-        private async Task StartTranscriberAsync(string label, AudioSource source)
+        private async Task StartTranscriberAsync()
         {
+            const string label = "Mixed";
+
             // Azure Speech SDK expects 16kHz, 16-bit, mono PCM for ConversationTranscriber
             var audioFormat = AudioStreamFormat.GetWaveFormatPCM(16000, 16, 1);
-            var pushStream = AudioInputStream.CreatePushStream(audioFormat);
+            pushStream = AudioInputStream.CreatePushStream(audioFormat);
             var audioConfig = AudioConfig.FromStreamInput(pushStream);
 
-            var transcriber = new ConversationTranscriber(speechConfig, audioConfig);
-            var stopSignal = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            if (source == AudioSource.Loopback)
-            {
-                loopbackPushStream = pushStream;
-                loopbackTranscriber = transcriber;
-                stopLoopback = stopSignal;
-            }
-            else
-            {
-                microphonePushStream = pushStream;
-                microphoneTranscriber = transcriber;
-                stopMicrophone = stopSignal;
-            }
+            transcriber = new ConversationTranscriber(speechConfig, audioConfig);
+            stopSignal = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             // Wire up events
             transcriber.Transcribing += (s, e) =>
@@ -157,96 +135,12 @@ namespace StereoMixCapture
         }
 
         /// <summary>
-        /// Pushes loopback audio data to the speech push stream, converting format as needed.
-        /// WASAPI loopback is typically 32-bit float, 48kHz, stereo — must convert to 16kHz 16-bit mono.
+        /// Pushes mixed audio data (already 16kHz 16-bit mono PCM) to the speech push stream.
         /// </summary>
-        private void OnLoopbackData(object? sender, AudioDataEventArgs e)
+        private void OnMixedData(object? sender, AudioDataEventArgs e)
         {
-            if (loopbackPushStream == null || e.BytesRecorded == 0) return;
-
-            byte[] converted = ConvertToPcm16kMono(e.Buffer, e.BytesRecorded, e.Format);
-            if (converted.Length > 0)
-            {
-                loopbackPushStream.Write(converted);
-            }
-        }
-
-        /// <summary>
-        /// Pushes microphone audio data to the speech push stream, converting format as needed.
-        /// Microphone is 44100Hz 16-bit stereo — must convert to 16kHz 16-bit mono.
-        /// </summary>
-        private void OnMicrophoneData(object? sender, AudioDataEventArgs e)
-        {
-            if (microphonePushStream == null || e.BytesRecorded == 0) return;
-
-            byte[] converted = ConvertToPcm16kMono(e.Buffer, e.BytesRecorded, e.Format);
-            if (converted.Length > 0)
-            {
-                microphonePushStream.Write(converted);
-            }
-        }
-
-        /// <summary>
-        /// Converts audio from any NAudio WaveFormat to 16kHz, 16-bit, mono PCM
-        /// as required by Azure Speech SDK ConversationTranscriber.
-        /// </summary>
-        private static byte[] ConvertToPcm16kMono(byte[] buffer, int bytesRecorded, NAudio.Wave.WaveFormat sourceFormat)
-        {
-            // Step 1: Create a RawSourceWaveStream from the buffer
-            using var sourceStream = new RawSourceWaveStream(
-                new MemoryStream(buffer, 0, bytesRecorded), sourceFormat);
-
-            // Step 2: Convert to PCM 16-bit if source is IEEE float
-            IWaveProvider pcmProvider;
-            if (sourceFormat.Encoding == WaveFormatEncoding.IeeeFloat)
-            {
-                pcmProvider = new WaveFloatTo16Provider(sourceStream);
-            }
-            else if (sourceFormat.BitsPerSample != 16)
-            {
-                // Handle other bit depths by converting to float first, then to 16-bit
-                pcmProvider = new WaveFloatTo16Provider(
-                    new Wave16ToFloatProvider(sourceStream));
-            }
-            else
-            {
-                pcmProvider = sourceStream;
-            }
-
-            // Step 3: Convert stereo to mono if needed
-            if (pcmProvider.WaveFormat.Channels > 1)
-            {
-                pcmProvider = new StereoToMonoProvider16(pcmProvider);
-            }
-
-            // Step 4: Resample to 16kHz if needed
-            if (pcmProvider.WaveFormat.SampleRate != 16000)
-            {
-                var targetFormat = new NAudio.Wave.WaveFormat(16000, 16, 1);
-                using var resampler = new MediaFoundationResampler(pcmProvider, targetFormat)
-                {
-                    ResamplerQuality = 60
-                };
-
-                return ReadAllBytes(resampler);
-            }
-
-            return ReadAllBytes(pcmProvider);
-        }
-
-        /// <summary>
-        /// Reads all available bytes from a wave provider.
-        /// </summary>
-        private static byte[] ReadAllBytes(IWaveProvider provider)
-        {
-            using var ms = new MemoryStream();
-            byte[] readBuffer = new byte[4096];
-            int bytesRead;
-            while ((bytesRead = provider.Read(readBuffer, 0, readBuffer.Length)) > 0)
-            {
-                ms.Write(readBuffer, 0, bytesRead);
-            }
-            return ms.ToArray();
+            if (pushStream == null || e.BytesRecorded == 0) return;
+            pushStream.Write(e.Buffer, e.BytesRecorded);
         }
 
         /// <summary>
@@ -255,21 +149,17 @@ namespace StereoMixCapture
         public async Task StopAsync()
         {
             // Unsubscribe from audio events
-            captureManager.LoopbackDataAvailable -= OnLoopbackData;
-            captureManager.MicrophoneDataAvailable -= OnMicrophoneData;
+            captureManager.MixedDataAvailable -= OnMixedData;
 
-            // Signal cancellation to both transcription tasks
+            // Signal cancellation
             cts?.Cancel();
 
-            // Close push streams to signal end-of-audio to the SDK
-            loopbackPushStream?.Close();
-            microphonePushStream?.Close();
+            // Close push stream to signal end-of-audio to the SDK
+            pushStream?.Close();
 
-            // Wait for both stop signals
-            if (stopLoopback != null)
-                await stopLoopback.Task.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
-            if (stopMicrophone != null)
-                await stopMicrophone.Task.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            // Wait for the stop signal
+            if (stopSignal != null)
+                await stopSignal.Task.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
 
             StatusChanged?.Invoke(this, "Transcription stopped.");
         }
@@ -278,13 +168,10 @@ namespace StereoMixCapture
         {
             cts?.Cancel();
 
-            captureManager.LoopbackDataAvailable -= OnLoopbackData;
-            captureManager.MicrophoneDataAvailable -= OnMicrophoneData;
+            captureManager.MixedDataAvailable -= OnMixedData;
 
-            loopbackPushStream?.Close();
-            microphonePushStream?.Close();
-            loopbackTranscriber?.Dispose();
-            microphoneTranscriber?.Dispose();
+            pushStream?.Close();
+            transcriber?.Dispose();
             cts?.Dispose();
         }
     }

@@ -1,5 +1,6 @@
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -31,7 +32,8 @@ namespace StereoMixCapture
     public enum AudioSource
     {
         Loopback,
-        Microphone
+        Microphone,
+        Mixed
     }
 
     /// <summary>
@@ -50,6 +52,13 @@ namespace StereoMixCapture
         private string? loopbackFilePath;
         private string? microphoneFilePath;
 
+        // Real-time mixing fields
+        private static readonly WaveFormat MixedOutputFormat = new WaveFormat(16000, 16, 1);
+        private BufferedWaveProvider? loopbackMixBuffer;
+        private BufferedWaveProvider? microphoneMixBuffer;
+        private Thread? mixThread;
+        private volatile bool mixThreadRunning;
+
         /// <summary>
         /// Fired when loopback audio data is available. Use this for real-time processing/transcription.
         /// </summary>
@@ -59,6 +68,12 @@ namespace StereoMixCapture
         /// Fired when microphone audio data is available. Use this for real-time processing/transcription.
         /// </summary>
         public event EventHandler<AudioDataEventArgs>? MicrophoneDataAvailable;
+
+        /// <summary>
+        /// Fired when mixed (loopback + microphone) audio data is available in 16kHz 16-bit mono PCM.
+        /// Use this for real-time transcription to avoid running two separate transcription sessions.
+        /// </summary>
+        public event EventHandler<AudioDataEventArgs>? MixedDataAvailable;
 
         /// <summary>
         /// Gets or sets the buffer size in milliseconds for microphone capture.
@@ -208,6 +223,13 @@ namespace StereoMixCapture
                 }
 
                 isCapturing = true;
+
+                // Start real-time mixing thread if anyone is listening
+                if (MixedDataAvailable != null)
+                {
+                    StartMixThread();
+                }
+
                 Console.WriteLine("\nCapturing audio... Press any key to stop.\n");
             }
             catch (Exception ex)
@@ -229,6 +251,9 @@ namespace StereoMixCapture
             }
 
             Console.WriteLine("\nStopping audio capture...");
+
+            // Stop the mixing thread before stopping capture sources
+            StopMixThread();
 
             // Stop capture sources first so no new data arrives
             if (loopbackCapture != null)
@@ -273,6 +298,184 @@ namespace StereoMixCapture
         public void Dispose()
         {
             StopCapture();
+        }
+
+        /// <summary>
+        /// Initialises the mix buffers and starts a background thread that periodically
+        /// drains both buffers, mixes them, and fires MixedDataAvailable.
+        /// </summary>
+        private void StartMixThread()
+        {
+            // Create buffered providers that accept raw PCM written from conversion helpers
+            loopbackMixBuffer = new BufferedWaveProvider(MixedOutputFormat)
+            {
+                BufferLength = MixedOutputFormat.AverageBytesPerSecond * 5,
+                DiscardOnBufferOverflow = true
+            };
+            microphoneMixBuffer = new BufferedWaveProvider(MixedOutputFormat)
+            {
+                BufferLength = MixedOutputFormat.AverageBytesPerSecond * 5,
+                DiscardOnBufferOverflow = true
+            };
+
+            // Subscribe to the raw data events to convert and push into the mix buffers
+            LoopbackDataAvailable += OnLoopbackForMix;
+            MicrophoneDataAvailable += OnMicrophoneForMix;
+
+            mixThreadRunning = true;
+            mixThread = new Thread(MixThreadLoop)
+            {
+                IsBackground = true,
+                Name = "AudioMixThread"
+            };
+            mixThread.Start();
+        }
+
+        private void OnLoopbackForMix(object? sender, AudioDataEventArgs e)
+        {
+            if (loopbackMixBuffer == null || e.BytesRecorded == 0) return;
+            byte[] converted = ConvertToPcm16kMono(e.Buffer, e.BytesRecorded, e.Format);
+            if (converted.Length > 0)
+                loopbackMixBuffer.AddSamples(converted, 0, converted.Length);
+        }
+
+        private void OnMicrophoneForMix(object? sender, AudioDataEventArgs e)
+        {
+            if (microphoneMixBuffer == null || e.BytesRecorded == 0) return;
+            byte[] converted = ConvertToPcm16kMono(e.Buffer, e.BytesRecorded, e.Format);
+            if (converted.Length > 0)
+                microphoneMixBuffer.AddSamples(converted, 0, converted.Length);
+        }
+
+        /// <summary>
+        /// Background thread that reads from both mix buffers, sums the samples, and
+        /// fires MixedDataAvailable at roughly 50ms intervals.
+        /// </summary>
+        private void MixThreadLoop()
+        {
+            // 50ms worth of 16kHz 16-bit mono = 16000 * 2 * 0.05 = 1600 bytes
+            const int intervalMs = 50;
+            int chunkBytes = MixedOutputFormat.AverageBytesPerSecond * intervalMs / 1000;
+            byte[] loopbackBuf = new byte[chunkBytes];
+            byte[] micBuf = new byte[chunkBytes];
+            byte[] mixedBuf = new byte[chunkBytes];
+
+            while (mixThreadRunning)
+            {
+                Thread.Sleep(intervalMs);
+
+                if (loopbackMixBuffer == null || microphoneMixBuffer == null) continue;
+
+                int loopbackAvailable = loopbackMixBuffer.BufferedBytes;
+                int micAvailable = microphoneMixBuffer.BufferedBytes;
+                int bytesToRead = Math.Min(chunkBytes, Math.Max(loopbackAvailable, micAvailable));
+                if (bytesToRead == 0) continue;
+
+                // Ensure even number of bytes (16-bit samples)
+                bytesToRead = bytesToRead / 2 * 2;
+
+                // Read what's available from each buffer, zero-filling if one source has less
+                int loopbackRead = 0;
+                if (loopbackMixBuffer.BufferedBytes > 0)
+                    loopbackRead = loopbackMixBuffer.Read(loopbackBuf, 0, Math.Min(bytesToRead, loopbackMixBuffer.BufferedBytes));
+
+                int micRead = 0;
+                if (microphoneMixBuffer.BufferedBytes > 0)
+                    micRead = microphoneMixBuffer.Read(micBuf, 0, Math.Min(bytesToRead, microphoneMixBuffer.BufferedBytes));
+
+                int maxRead = Math.Max(loopbackRead, micRead);
+                if (maxRead == 0) continue;
+
+                // Mix by summing 16-bit samples with clipping
+                for (int i = 0; i < maxRead; i += 2)
+                {
+                    short s1 = (i + 1 < loopbackRead)
+                        ? (short)(loopbackBuf[i] | (loopbackBuf[i + 1] << 8))
+                        : (short)0;
+                    short s2 = (i + 1 < micRead)
+                        ? (short)(micBuf[i] | (micBuf[i + 1] << 8))
+                        : (short)0;
+
+                    int mixed = s1 + s2;
+                    if (mixed > short.MaxValue) mixed = short.MaxValue;
+                    if (mixed < short.MinValue) mixed = short.MinValue;
+
+                    mixedBuf[i] = (byte)(mixed & 0xFF);
+                    mixedBuf[i + 1] = (byte)((mixed >> 8) & 0xFF);
+                }
+
+                MixedDataAvailable?.Invoke(this, new AudioDataEventArgs(
+                    mixedBuf, maxRead, MixedOutputFormat, AudioSource.Mixed));
+            }
+        }
+
+        /// <summary>
+        /// Converts audio from any NAudio WaveFormat to 16kHz, 16-bit, mono PCM.
+        /// </summary>
+        private static byte[] ConvertToPcm16kMono(byte[] buffer, int bytesRecorded, WaveFormat sourceFormat)
+        {
+            using var sourceStream = new RawSourceWaveStream(
+                new MemoryStream(buffer, 0, bytesRecorded), sourceFormat);
+
+            IWaveProvider pcmProvider;
+            if (sourceFormat.Encoding == WaveFormatEncoding.IeeeFloat)
+            {
+                pcmProvider = new WaveFloatTo16Provider(sourceStream);
+            }
+            else if (sourceFormat.BitsPerSample != 16)
+            {
+                pcmProvider = new WaveFloatTo16Provider(
+                    new Wave16ToFloatProvider(sourceStream));
+            }
+            else
+            {
+                pcmProvider = sourceStream;
+            }
+
+            if (pcmProvider.WaveFormat.Channels > 1)
+            {
+                pcmProvider = new StereoToMonoProvider16(pcmProvider);
+            }
+
+            if (pcmProvider.WaveFormat.SampleRate != 16000)
+            {
+                var targetFormat = new WaveFormat(16000, 16, 1);
+                using var resampler = new MediaFoundationResampler(pcmProvider, targetFormat)
+                {
+                    ResamplerQuality = 60
+                };
+                return ReadAllBytes(resampler);
+            }
+
+            return ReadAllBytes(pcmProvider);
+        }
+
+        private static byte[] ReadAllBytes(IWaveProvider provider)
+        {
+            using var ms = new MemoryStream();
+            byte[] readBuffer = new byte[4096];
+            int bytesRead;
+            while ((bytesRead = provider.Read(readBuffer, 0, readBuffer.Length)) > 0)
+            {
+                ms.Write(readBuffer, 0, bytesRead);
+            }
+            return ms.ToArray();
+        }
+
+        private void StopMixThread()
+        {
+            mixThreadRunning = false;
+            if (mixThread != null)
+            {
+                mixThread.Join(timeout: TimeSpan.FromSeconds(2));
+                mixThread = null;
+            }
+
+            LoopbackDataAvailable -= OnLoopbackForMix;
+            MicrophoneDataAvailable -= OnMicrophoneForMix;
+
+            loopbackMixBuffer = null;
+            microphoneMixBuffer = null;
         }
     }
 }
